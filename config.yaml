@@ -1,0 +1,12 @@
+server:
+    addr: "127.0.0.1:8080"
+
+database:
+    postgres:
+        host: "127.0.0.1"
+        port: 5432
+        user: "kulo"
+        password: "123456"
+        dbname: "nvidia-gpu-detector"
+        sslmode: "disable"
+        timezone: "Asia/Shanghai"
