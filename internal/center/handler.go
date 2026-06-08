@@ -9,7 +9,7 @@ import (
 	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
 )
 
-func HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -34,6 +34,18 @@ func HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		ServerTime:       time.Now(),
 		RenewToken:       "test-token",
 		NextHeartbeatSec: 10,
+	}
+
+	err = s.agentStore.UpdateHeartbeat(
+		req.AgentName,
+		req.Hostname,
+		req.Version,
+		req.Sequence,
+		resp.RenewToken,
+	)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")

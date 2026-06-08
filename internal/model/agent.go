@@ -2,6 +2,12 @@ package model
 
 import "time"
 
+const (
+	AgentStatusOnline   = "online"
+	AgentStatusOffline  = "offline"
+	AgentStatusAbnormal = "abnormal"
+)
+
 type Agent struct {
 	ID uint `gorm:"primaryKey"`
 

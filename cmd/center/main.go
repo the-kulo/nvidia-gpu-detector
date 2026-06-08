@@ -7,6 +7,8 @@ import (
 	"github.com/the-kulo/nvidia-gpu-detector/internal/center"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/config"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/db"
+	"github.com/the-kulo/nvidia-gpu-detector/internal/model"
+	"github.com/the-kulo/nvidia-gpu-detector/internal/store"
 )
 
 func main() {
@@ -22,10 +24,21 @@ func main() {
 
 	fmt.Println("postgres connected:", gormDB != nil)
 
+	err = gormDB.AutoMigrate(&model.Agent{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("database migrated")
+
+	agentStore := store.NewAgentStore(gormDB)
+
+	server := center.NewServer(agentStore)
+
 	addr := cfg.Server.Addr
 	fmt.Println("server addr:", addr)
 
-	err = center.StartServer(addr)
+	err = server.StartServer(addr)
 	if err != nil {
 		log.Fatal(err)
 	}
