@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
+	"github.com/the-kulo/nvidia-gpu-detector/internal/token"
 )
 
 func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
@@ -35,9 +36,15 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("version:", req.Version)
 	fmt.Println("renew_token:", req.RenewToken)
 
+	token, err := token.GenerateRenewToken()
+	if err != nil {
+		http.Error(w, "generate token failed", http.StatusInternalServerError)
+		return
+	}
+
 	resp := heartbeat.HeartbeatResponse{
 		ServerTime:       time.Now(),
-		RenewToken:       "test-token",
+		RenewToken:       token,
 		NextHeartbeatSec: 10,
 	}
 
