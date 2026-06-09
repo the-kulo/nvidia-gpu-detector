@@ -19,7 +19,12 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
-		http.Error(w, "method bad Request", http.StatusBadRequest)
+		http.Error(w, "bad Request", http.StatusBadRequest)
+		return
+	}
+
+	if req.AgentName == "" || req.Sequence <= 0 {
+		http.Error(w, "bad Request", http.StatusBadRequest)
 		return
 	}
 
