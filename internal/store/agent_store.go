@@ -69,3 +69,35 @@ func (s *AgentStore) UpdateHeartbeat(
 	return nil
 
 }
+
+func (s *AgentStore) VerifyHeartbeat(
+	agentName string,
+	sequence int64,
+	renewtoken string,
+) error {
+	var agent model.Agent
+
+	err := s.db.Where("agent_name = ?", agentName).First(&agent).Error
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if sequence == 1 && renewtoken == "" {
+				return nil
+			}
+
+			return fmt.Errorf("agent not registered")
+		}
+
+		return fmt.Errorf("query agent failed: %w", err)
+	}
+
+	if sequence <= agent.LastSequence {
+		return fmt.Errorf("invalid sequence")
+	}
+
+	if renewtoken != agent.LastRenewToken {
+		return fmt.Errorf("invalid renew token")
+	}
+
+	return nil
+}

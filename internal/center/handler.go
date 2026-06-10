@@ -36,7 +36,17 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("version:", req.Version)
 	fmt.Println("renew_token:", req.RenewToken)
 
-	token, err := token.GenerateRenewToken()
+	err = s.agentStore.VerifyHeartbeat(
+		req.AgentName,
+		req.Sequence,
+		req.RenewToken,
+	)
+	if err != nil {
+		http.Error(w, "heartbeat verify failed", http.StatusUnauthorized)
+		return
+	}
+
+	newRenewtoken, err := token.GenerateRenewToken()
 	if err != nil {
 		http.Error(w, "generate token failed", http.StatusInternalServerError)
 		return
@@ -44,7 +54,7 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp := heartbeat.HeartbeatResponse{
 		ServerTime:       time.Now(),
-		RenewToken:       token,
+		RenewToken:       newRenewtoken,
 		NextHeartbeatSec: 10,
 	}
 
