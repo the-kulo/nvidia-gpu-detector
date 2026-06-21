@@ -7,7 +7,15 @@ import (
 )
 
 func GenerateRenewToken() (string, error) {
-	b := make([]byte, 32)
+	return generateRandomHex(32)
+}
+
+func GenerateSessionID() (string, error) {
+	return generateRandomHex(16)
+}
+
+func generateRandomHex(size int) (string, error) {
+	b := make([]byte, size)
 	_, err := rand.Read(b)
 	if err != nil {
 		return "", fmt.Errorf("generate random token failed: %w", err)

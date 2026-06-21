@@ -16,7 +16,7 @@ func main() {
 		AgentName: "agent-001",
 		Hostname:  hostname,
 		Version:   "v0.0.1",
-		CenterURL: "http://127.0.0.1:8080/heartbeat",
+		CenterURL: "http://127.0.0.1:8080",
 	}
 
 	agent.StartAgent(cfg)

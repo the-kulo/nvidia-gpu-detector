@@ -16,9 +16,7 @@ type Agent struct {
 	Version   string
 	Status    string
 
-	LastSeenAt     time.Time
-	LastSequence   int64
-	LastRenewToken string
+	LastSeenAt time.Time
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
+	"github.com/the-kulo/nvidia-gpu-detector/internal/session"
 )
 
 type Config struct {
@@ -23,14 +25,41 @@ func StartAgent(cfg Config) {
 	}
 
 	var sequence int64 = 0
-	renewToken := ""
 	nextHeartbeatSec := 10
+	sessionID := ""
+	renewToken := ""
+
+	for {
+		registerResp, err := registerSession(client, cfg.CenterURL, session.RegisterRequest{
+			AgentName: cfg.AgentName,
+			Hostname:  cfg.Hostname,
+			Version:   cfg.Version,
+		})
+		if err != nil {
+			fmt.Println("register session failed:", err)
+			time.Sleep(time.Second * 10)
+			continue
+		}
+
+		sessionID = registerResp.SessionID
+		renewToken = registerResp.RenewToken
+
+		if registerResp.NextHeartbeatSec > 0 {
+			nextHeartbeatSec = registerResp.NextHeartbeatSec
+		}
+
+		fmt.Println("register session ok")
+		fmt.Println("session_id:", sessionID)
+		fmt.Println("server_time:", registerResp.ServerTime)
+		break
+	}
 
 	for {
 		sequence++
 
 		reqBody := heartbeat.HeartbeatRequest{
 			AgentName:  cfg.AgentName,
+			SessionID:  sessionID,
 			Hostname:   cfg.Hostname,
 			Timestamp:  time.Now(),
 			Sequence:   sequence,
@@ -61,13 +90,47 @@ func StartAgent(cfg Config) {
 	}
 }
 
-func sendHeartbeat(client *http.Client, url string, reqBody heartbeat.HeartbeatRequest) (heartbeat.HeartbeatResponse, error) {
+func registerSession(client *http.Client, centerURL string, reqBody session.RegisterRequest) (session.RegisterResponse, error) {
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return session.RegisterResponse{}, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, centerEndpoint(centerURL, "/agent/register"), bytes.NewReader(body))
+	if err != nil {
+		return session.RegisterResponse{}, err
+	}
+
+	req.Header.Set("Content-type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return session.RegisterResponse{}, err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return session.RegisterResponse{}, fmt.Errorf("register failed, status: %d", resp.StatusCode)
+	}
+
+	var registerResp session.RegisterResponse
+	err = json.NewDecoder(resp.Body).Decode(&registerResp)
+	if err != nil {
+		return session.RegisterResponse{}, err
+	}
+
+	return registerResp, nil
+}
+
+func sendHeartbeat(client *http.Client, centerURL string, reqBody heartbeat.HeartbeatRequest) (heartbeat.HeartbeatResponse, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return heartbeat.HeartbeatResponse{}, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, centerEndpoint(centerURL, "/heartbeat"), bytes.NewReader(body))
 	if err != nil {
 		return heartbeat.HeartbeatResponse{}, err
 	}
@@ -93,4 +156,8 @@ func sendHeartbeat(client *http.Client, url string, reqBody heartbeat.HeartbeatR
 	}
 
 	return heartbeatResp, nil
+}
+
+func centerEndpoint(centerURL string, path string) string {
+	return strings.TrimRight(centerURL, "/") + path
 }

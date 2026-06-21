@@ -6,6 +6,7 @@ import (
 
 type HeartbeatRequest struct {
 	AgentName  string    `json:"agent_name"`
+	SessionID  string    `json:"session_id"`
 	Hostname   string    `json:"hostname"`
 	Timestamp  time.Time `json:"timestamp"`
 	Sequence   int64     `json:"sequence"`

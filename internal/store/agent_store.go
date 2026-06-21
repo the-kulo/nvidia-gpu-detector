@@ -19,84 +19,88 @@ func NewAgentStore(db *gorm.DB) *AgentStore {
 	}
 }
 
-func (s *AgentStore) UpdateHeartbeat(
+func (s *AgentStore) UpdateLastSeen(
 	agentName string,
 	hostname string,
 	version string,
-	sequence int64,
-	newRenewToken string,
 ) error {
 	now := time.Now()
 
-	var agent model.Agent
-
-	err := s.db.Where("agent_name = ?", agentName).First(&agent).Error
-
+	agent, err := s.findAgentByName(agentName)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			newAgent := model.Agent{
-				AgentName:      agentName,
-				Hostname:       hostname,
-				Version:        version,
-				Status:         model.AgentStatusOnline,
-				LastSeenAt:     now,
-				LastSequence:   sequence,
-				LastRenewToken: newRenewToken,
-			}
-
-			if err := s.db.Create(&newAgent).Error; err != nil {
-				return fmt.Errorf("create agent failed: %w", err)
-			}
-
-			return nil
+			return s.createAgent(agentName, hostname, version, now)
 		}
 		return fmt.Errorf("query agent failed: %w", err)
 	}
 
-	err = s.db.Model(&agent).Updates(map[string]interface{}{
-		"hostname":         hostname,
-		"version":          version,
-		"status":           model.AgentStatusOnline,
-		"last_seen_at":     now,
-		"last_sequence":    sequence,
-		"last_renew_token": newRenewToken,
-	}).Error
-
+	err = s.updateAgentLastSeen(&agent, hostname, version, now)
 	if err != nil {
-		return fmt.Errorf("update agent heartbeat failed: %w", err)
+		return fmt.Errorf("update agent last seen failed: %w", err)
 	}
 
 	return nil
-
 }
 
-func (s *AgentStore) VerifyHeartbeat(
-	agentName string,
-	sequence int64,
-	renewtoken string,
-) error {
+func (s *AgentStore) findAgentByName(agentName string) (model.Agent, error) {
 	var agent model.Agent
 
-	err := s.db.Where("agent_name = ?", agentName).First(&agent).Error
+	err := s.db.
+		Where("agent_name = ?", agentName).
+		First(&agent).
+		Error
+	if err != nil {
+		return model.Agent{}, err
+	}
+
+	return agent, nil
+}
+
+func (s *AgentStore) createAgent(
+	agentName string,
+	hostname string,
+	version string,
+	now time.Time,
+) error {
+	agent := model.Agent{
+		AgentName:  agentName,
+		Hostname:   hostname,
+		Version:    version,
+		Status:     model.AgentStatusOnline,
+		LastSeenAt: now,
+	}
+
+	err := s.db.Create(&agent).Error
+	if err != nil {
+		return fmt.Errorf("create agent failed: %w", err)
+	}
+
+	return nil
+}
+
+func (s *AgentStore) updateAgentLastSeen(
+	agent *model.Agent,
+	hostname string,
+	version string,
+	now time.Time,
+) error {
+	return s.db.Model(agent).Updates(map[string]interface{}{
+		"hostname":     hostname,
+		"version":      version,
+		"status":       model.AgentStatusOnline,
+		"last_seen_at": now,
+	}).Error
+}
+
+func (s *AgentStore) MarkOfflineBefore(cutoff time.Time) error {
+	err := s.db.
+		Model(&model.Agent{}).
+		Where("status = ? AND last_seen_at < ?", model.AgentStatusOnline, cutoff).
+		Update("status", model.AgentStatusOffline).
+		Error
 
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			if sequence == 1 && renewtoken == "" {
-				return nil
-			}
-
-			return fmt.Errorf("agent not registered")
-		}
-
-		return fmt.Errorf("query agent failed: %w", err)
-	}
-
-	if sequence <= agent.LastSequence {
-		return fmt.Errorf("invalid sequence")
-	}
-
-	if renewtoken != agent.LastRenewToken {
-		return fmt.Errorf("invalid renew token")
+		return fmt.Errorf("mark offline failed: %w", err)
 	}
 
 	return nil

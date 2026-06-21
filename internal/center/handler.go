@@ -24,7 +24,7 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.AgentName == "" || req.Sequence <= 0 {
+	if req.AgentName == "" || req.SessionID == "" || req.Sequence <= 0 {
 		http.Error(w, "bad Request", http.StatusBadRequest)
 		return
 	}
@@ -36,8 +36,9 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("version:", req.Version)
 	fmt.Println("renew_token:", req.RenewToken)
 
-	err = s.agentStore.VerifyHeartbeat(
+	err = s.sessionStore.VerifyHeartbeat(
 		req.AgentName,
+		req.SessionID,
 		req.Sequence,
 		req.RenewToken,
 	)
@@ -58,12 +59,21 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		NextHeartbeatSec: 10,
 	}
 
-	err = s.agentStore.UpdateHeartbeat(
+	err = s.sessionStore.UpdateHeartbeat(
+		req.AgentName,
+		req.SessionID,
+		req.Sequence,
+		resp.RenewToken,
+	)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	err = s.agentStore.UpdateLastSeen(
 		req.AgentName,
 		req.Hostname,
 		req.Version,
-		req.Sequence,
-		resp.RenewToken,
 	)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
