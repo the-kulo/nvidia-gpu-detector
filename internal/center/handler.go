@@ -2,7 +2,6 @@ package center
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -28,13 +27,6 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad Request", http.StatusBadRequest)
 		return
 	}
-
-	fmt.Println("receive heartbeat:")
-	fmt.Println("agent_name:", req.AgentName)
-	fmt.Println("hostname:", req.Hostname)
-	fmt.Println("sequence:", req.Sequence)
-	fmt.Println("version:", req.Version)
-	fmt.Println("renew_token:", req.RenewToken)
 
 	err = s.sessionStore.VerifyHeartbeat(
 		req.AgentName,

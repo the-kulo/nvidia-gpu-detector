@@ -77,8 +77,10 @@ func (s *SessionStore) VerifyHeartbeat(
 		return fmt.Errorf("session is not online")
 	}
 
-	if sequence <= session.LastSequence {
-		return fmt.Errorf("invalid sequence")
+	expectSequence := session.LastSequence + 1
+
+	if sequence != expectSequence {
+		return fmt.Errorf("invalid sequence: got %d, want %d", sequence, expectSequence)
 	}
 
 	if renewToken != session.LastRenewToken {
@@ -96,18 +98,27 @@ func (s *SessionStore) UpdateHeartbeat(
 ) error {
 	now := time.Now()
 
-	err := s.db.
+	result := s.db.
 		Model(&model.AgentSession{}).
-		Where("agent_name = ? AND session_id = ?", agentName, sessionID).
+		Where(
+			"agent_name = ? AND session_id = ? AND status = ?",
+			agentName,
+			sessionID,
+			model.SessionStatusOnline,
+		).
 		Updates(map[string]any{
 			"last_sequence":    sequence,
 			"last_renew_token": newRenewToken,
 			"last_seen_at":     now,
 			"status":           model.SessionStatusOnline,
-		}).Error
+		})
 
-	if err != nil {
-		return fmt.Errorf("update session heartbeat failed: %w", err)
+	if result.Error != nil {
+		return fmt.Errorf("update session heartbeat failed: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("session not found or not online")
 	}
 
 	return nil
