@@ -3,13 +3,16 @@ package center
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/model"
+	"github.com/the-kulo/nvidia-gpu-detector/internal/service"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/session"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/store"
 	"gorm.io/driver/sqlite"
@@ -22,7 +25,18 @@ type testServer struct {
 	db      *gorm.DB
 }
 
-func setupTestServer(t *testing.T) testServer {
+type fakeHeartbeatService struct {
+	commands []service.HeartbeatCommand
+	result   service.HeartbeatResult
+	err      error
+}
+
+func (s *fakeHeartbeatService) HandleHeartbeat(command service.HeartbeatCommand) (service.HeartbeatResult, error) {
+	s.commands = append(s.commands, command)
+	return s.result, s.err
+}
+
+func setupTestServer(t *testing.T, heartbeatService service.HeartbeatService) testServer {
 	t.Helper()
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
@@ -39,6 +53,7 @@ func setupTestServer(t *testing.T) testServer {
 	server := NewServer(
 		store.NewAgentStore(db),
 		store.NewSessionStore(db),
+		heartbeatService,
 	)
 
 	mux := http.NewServeMux()
@@ -52,7 +67,7 @@ func setupTestServer(t *testing.T) testServer {
 }
 
 func TestRegisterHandlerCreatesAgentAndSession(t *testing.T) {
-	testServer := setupTestServer(t)
+	testServer := setupTestServer(t, &fakeHeartbeatService{})
 
 	registerResp := registerAgent(t, testServer.handler, "agent-001")
 
@@ -86,104 +101,126 @@ func TestRegisterHandlerCreatesAgentAndSession(t *testing.T) {
 	}
 }
 
-func TestHeartbeatHandlerBusinessRules(t *testing.T) {
-	testServer := setupTestServer(t)
+func TestHeartbeatHandlerMapsCommandAndResult(t *testing.T) {
+	serverTime := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	heartbeatService := &fakeHeartbeatService{result: service.HeartbeatResult{
+		ServerTime:       serverTime,
+		RenewToken:       "new-token",
+		NextHeartbeatSec: 15,
+	}}
+	testServer := setupTestServer(t, heartbeatService)
 
-	firstRegisterResp := registerAgent(t, testServer.handler, "agent-001")
-
-	status := postJSON(t, testServer.handler, "/heartbeat", heartbeat.HeartbeatRequest{
+	request := heartbeat.HeartbeatRequest{
 		AgentName:  "agent-001",
-		SessionID:  firstRegisterResp.SessionID,
+		SessionID:  "session-001",
+		Hostname:   "test-host",
+		Version:    "v0.0.1",
+		Sequence:   4,
+		RenewToken: "old-token",
+	}
+	var response heartbeat.HeartbeatResponse
+	status := postJSON(t, testServer.handler, "/heartbeat", request, &response)
+
+	if status != http.StatusOK {
+		t.Fatalf("heartbeat status = %d, want %d", status, http.StatusOK)
+	}
+	wantCommand := service.HeartbeatCommand{
+		AgentName:  request.AgentName,
+		SessionID:  request.SessionID,
+		Hostname:   request.Hostname,
+		Version:    request.Version,
+		Sequence:   request.Sequence,
+		RenewToken: request.RenewToken,
+	}
+	if !reflect.DeepEqual(heartbeatService.commands, []service.HeartbeatCommand{wantCommand}) {
+		t.Fatalf("service commands = %+v, want %+v", heartbeatService.commands, []service.HeartbeatCommand{wantCommand})
+	}
+	wantResponse := heartbeat.HeartbeatResponse{
+		ServerTime:       serverTime,
+		RenewToken:       "new-token",
+		NextHeartbeatSec: 15,
+	}
+	if !reflect.DeepEqual(response, wantResponse) {
+		t.Fatalf("heartbeat response = %+v, want %+v", response, wantResponse)
+	}
+}
+
+func TestHeartbeatHandlerMapsRejectedToUnauthorized(t *testing.T) {
+	heartbeatService := &fakeHeartbeatService{err: service.ErrHeartbeatRejected}
+	testServer := setupTestServer(t, heartbeatService)
+
+	status := postJSON(t, testServer.handler, "/heartbeat", validHeartbeatRequest(), nil)
+
+	if status != http.StatusUnauthorized {
+		t.Fatalf("heartbeat status = %d, want %d", status, http.StatusUnauthorized)
+	}
+	if len(heartbeatService.commands) != 1 {
+		t.Fatalf("service call count = %d, want 1", len(heartbeatService.commands))
+	}
+}
+
+func TestHeartbeatHandlerMapsOperationalErrorToInternalServerError(t *testing.T) {
+	heartbeatService := &fakeHeartbeatService{err: errors.New("database unavailable")}
+	testServer := setupTestServer(t, heartbeatService)
+
+	status := postJSON(t, testServer.handler, "/heartbeat", validHeartbeatRequest(), nil)
+
+	if status != http.StatusInternalServerError {
+		t.Fatalf("heartbeat status = %d, want %d", status, http.StatusInternalServerError)
+	}
+	if len(heartbeatService.commands) != 1 {
+		t.Fatalf("service call count = %d, want 1", len(heartbeatService.commands))
+	}
+}
+
+func TestHeartbeatHandlerDoesNotCallServiceForInvalidInput(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "malformed JSON", body: []byte("{")},
+		{name: "missing agent name", body: mustMarshal(t, heartbeat.HeartbeatRequest{SessionID: "session-001", Sequence: 1})},
+		{name: "missing session ID", body: mustMarshal(t, heartbeat.HeartbeatRequest{AgentName: "agent-001", Sequence: 1})},
+		{name: "invalid sequence", body: mustMarshal(t, heartbeat.HeartbeatRequest{AgentName: "agent-001", SessionID: "session-001", Sequence: 0})},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			heartbeatService := &fakeHeartbeatService{}
+			testServer := setupTestServer(t, heartbeatService)
+			request := httptest.NewRequest(http.MethodPost, "/heartbeat", bytes.NewReader(tt.body))
+			recorder := httptest.NewRecorder()
+
+			testServer.handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("heartbeat status = %d, want %d", recorder.Code, http.StatusBadRequest)
+			}
+			if len(heartbeatService.commands) != 0 {
+				t.Fatalf("service call count = %d, want 0", len(heartbeatService.commands))
+			}
+		})
+	}
+}
+
+func validHeartbeatRequest() heartbeat.HeartbeatRequest {
+	return heartbeat.HeartbeatRequest{
+		AgentName:  "agent-001",
+		SessionID:  "session-001",
 		Hostname:   "test-host",
 		Version:    "v0.0.1",
 		Sequence:   1,
-		RenewToken: "wrong-token",
-	}, nil)
-	if status != http.StatusUnauthorized {
-		t.Fatalf("wrong token status = %d, want %d", status, http.StatusUnauthorized)
+		RenewToken: "old-token",
 	}
+}
 
-	firstHeartbeatResp := sendHeartbeat(
-		t,
-		testServer.handler,
-		"agent-001",
-		firstRegisterResp.SessionID,
-		firstRegisterResp.RenewToken,
-		1,
-	)
-	if firstHeartbeatResp.RenewToken == "" {
-		t.Fatal("heartbeat renew_token is empty")
+func mustMarshal(t *testing.T, value any) []byte {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal request failed: %v", err)
 	}
-	if firstHeartbeatResp.RenewToken == firstRegisterResp.RenewToken {
-		t.Fatal("heartbeat did not rotate renew token")
-	}
-
-	status = postJSON(t, testServer.handler, "/heartbeat", heartbeat.HeartbeatRequest{
-		AgentName:  "agent-001",
-		SessionID:  firstRegisterResp.SessionID,
-		Hostname:   "test-host",
-		Version:    "v0.0.1",
-		Sequence:   1,
-		RenewToken: firstHeartbeatResp.RenewToken,
-	}, nil)
-	if status != http.StatusUnauthorized {
-		t.Fatalf("repeated sequence status = %d, want %d", status, http.StatusUnauthorized)
-	}
-
-	secondRegisterResp := registerAgent(t, testServer.handler, "agent-001")
-	if secondRegisterResp.SessionID == firstRegisterResp.SessionID {
-		t.Fatal("new register reused old session_id")
-	}
-
-	_ = sendHeartbeat(
-		t,
-		testServer.handler,
-		"agent-001",
-		secondRegisterResp.SessionID,
-		secondRegisterResp.RenewToken,
-		1,
-	)
-
-	oldLastSeenAt := time.Now().Add(-time.Hour)
-	if err := testServer.db.Model(&model.AgentSession{}).
-		Where("session_id = ?", firstRegisterResp.SessionID).
-		Update("last_seen_at", oldLastSeenAt).
-		Error; err != nil {
-		t.Fatalf("age old session failed: %v", err)
-	}
-
-	sessionStore := store.NewSessionStore(testServer.db)
-	if err := sessionStore.MarkExpiredBefore(time.Now().Add(-30 * time.Second)); err != nil {
-		t.Fatalf("mark expired before failed: %v", err)
-	}
-
-	var oldSession model.AgentSession
-	if err := testServer.db.Where("session_id = ?", firstRegisterResp.SessionID).First(&oldSession).Error; err != nil {
-		t.Fatalf("query old session failed: %v", err)
-	}
-	if oldSession.Status != model.SessionStatusEnded {
-		t.Fatalf("old session status = %q, want %q", oldSession.Status, model.SessionStatusEnded)
-	}
-
-	var newSession model.AgentSession
-	if err := testServer.db.Where("session_id = ?", secondRegisterResp.SessionID).First(&newSession).Error; err != nil {
-		t.Fatalf("query new session failed: %v", err)
-	}
-	if newSession.Status != model.SessionStatusOnline {
-		t.Fatalf("new session status = %q, want %q", newSession.Status, model.SessionStatusOnline)
-	}
-
-	status = postJSON(t, testServer.handler, "/heartbeat", heartbeat.HeartbeatRequest{
-		AgentName:  "agent-001",
-		SessionID:  firstRegisterResp.SessionID,
-		Hostname:   "test-host",
-		Version:    "v0.0.1",
-		Sequence:   2,
-		RenewToken: firstHeartbeatResp.RenewToken,
-	}, nil)
-	if status != http.StatusUnauthorized {
-		t.Fatalf("ended old session heartbeat status = %d, want %d", status, http.StatusUnauthorized)
-	}
+	return body
 }
 
 func registerAgent(t *testing.T, handler http.Handler, agentName string) session.RegisterResponse {
@@ -197,32 +234,6 @@ func registerAgent(t *testing.T, handler http.Handler, agentName string) session
 	}, &resp)
 	if status != http.StatusOK {
 		t.Fatalf("register status = %d, want %d", status, http.StatusOK)
-	}
-
-	return resp
-}
-
-func sendHeartbeat(
-	t *testing.T,
-	handler http.Handler,
-	agentName string,
-	sessionID string,
-	renewToken string,
-	sequence int64,
-) heartbeat.HeartbeatResponse {
-	t.Helper()
-
-	var resp heartbeat.HeartbeatResponse
-	status := postJSON(t, handler, "/heartbeat", heartbeat.HeartbeatRequest{
-		AgentName:  agentName,
-		SessionID:  sessionID,
-		Hostname:   "test-host",
-		Version:    "v0.0.1",
-		Sequence:   sequence,
-		RenewToken: renewToken,
-	}, &resp)
-	if status != http.StatusOK {
-		t.Fatalf("heartbeat status = %d, want %d", status, http.StatusOK)
 	}
 
 	return resp
