@@ -1,11 +1,12 @@
 package service
 
 import (
-	"errors"
 	"time"
+
+	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
 )
 
-var ErrHeartbeatRejected = errors.New("heartbeat rejected")
+var ErrHeartbeatRejected = heartbeat.ErrRejected
 
 type HeartbeatCommand struct {
 	AgentName  string
