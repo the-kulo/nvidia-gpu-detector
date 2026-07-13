@@ -2,7 +2,9 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -19,84 +21,133 @@ type Config struct {
 	CenterURL string
 }
 
+type HTTPStatusError struct {
+	Operation  string
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s failed, status: %d", e.Operation, e.StatusCode)
+}
+
+const (
+	defaultHeartbeatInterval = 10 * time.Second
+	defaultRetryInterval     = 10 * time.Second
+)
+
 func StartAgent(cfg Config) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
 
-	var sequence int64 = 0
-	nextHeartbeatSec := 10
-	sessionID := ""
-	renewToken := ""
+	if err := runAgent(context.Background(), client, cfg, defaultRetryInterval); err != nil {
+		fmt.Println("agent stopped:", err)
+	}
+}
 
+func runAgent(ctx context.Context, client *http.Client, cfg Config, retryInterval time.Duration) error {
 	for {
-		registerResp, err := registerSession(client, cfg.CenterURL, session.RegisterRequest{
+		registerResp, err := registerSession(ctx, client, cfg.CenterURL, session.RegisterRequest{
 			AgentName: cfg.AgentName,
 			Hostname:  cfg.Hostname,
 			Version:   cfg.Version,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			fmt.Println("register session failed:", err)
-			time.Sleep(time.Second * 10)
+			if err := waitFor(ctx, retryInterval); err != nil {
+				return err
+			}
 			continue
 		}
 
-		sessionID = registerResp.SessionID
-		renewToken = registerResp.RenewToken
+		sessionID := registerResp.SessionID
+		renewToken := registerResp.RenewToken
+		var sequence int64
+		nextHeartbeatInterval := defaultHeartbeatInterval
 
 		if registerResp.NextHeartbeatSec > 0 {
-			nextHeartbeatSec = registerResp.NextHeartbeatSec
+			nextHeartbeatInterval = time.Duration(registerResp.NextHeartbeatSec) * time.Second
 		}
 
 		fmt.Println("register session ok")
 		fmt.Println("session_id:", sessionID)
 		fmt.Println("server_time:", registerResp.ServerTime)
-		break
-	}
 
-	for {
-		sequence++
+		for {
+			sequence++
 
-		reqBody := heartbeat.HeartbeatRequest{
-			AgentName:  cfg.AgentName,
-			SessionID:  sessionID,
-			Hostname:   cfg.Hostname,
-			Timestamp:  time.Now(),
-			Sequence:   sequence,
-			Version:    cfg.Version,
-			RenewToken: renewToken,
+			reqBody := heartbeat.HeartbeatRequest{
+				AgentName:  cfg.AgentName,
+				SessionID:  sessionID,
+				Hostname:   cfg.Hostname,
+				Timestamp:  time.Now(),
+				Sequence:   sequence,
+				Version:    cfg.Version,
+				RenewToken: renewToken,
+			}
+
+			resp, err := sendHeartbeat(ctx, client, cfg.CenterURL, reqBody)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+
+				var statusErr *HTTPStatusError
+				if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized {
+					sessionID = ""
+					renewToken = ""
+					sequence = 0
+					break
+				}
+
+				fmt.Println("send heartbeat failed:", err)
+				if err := waitFor(ctx, retryInterval); err != nil {
+					return err
+				}
+				continue
+			}
+
+			renewToken = resp.RenewToken
+
+			if resp.NextHeartbeatSec > 0 {
+				nextHeartbeatInterval = time.Duration(resp.NextHeartbeatSec) * time.Second
+			}
+
+			fmt.Println("heartbeat ok")
+			fmt.Println("server_time:", resp.ServerTime)
+			fmt.Println("renew_token:", renewToken)
+			fmt.Println("next_heartbeat_sec:", int(nextHeartbeatInterval/time.Second))
+
+			if err := waitFor(ctx, nextHeartbeatInterval); err != nil {
+				return err
+			}
 		}
-
-		resp, err := sendHeartbeat(client, cfg.CenterURL, reqBody)
-		if err != nil {
-			fmt.Println("send heartbeat failed:", err)
-
-			time.Sleep(time.Second * 10)
-			continue
-		}
-
-		renewToken = resp.RenewToken
-
-		if resp.NextHeartbeatSec > 0 {
-			nextHeartbeatSec = resp.NextHeartbeatSec
-		}
-
-		fmt.Println("heartbeat ok")
-		fmt.Println("server_time:", resp.ServerTime)
-		fmt.Println("renew_token:", renewToken)
-		fmt.Println("next_heartbeat_sec:", nextHeartbeatSec)
-
-		time.Sleep(time.Duration(nextHeartbeatSec) * time.Second)
 	}
 }
 
-func registerSession(client *http.Client, centerURL string, reqBody session.RegisterRequest) (session.RegisterResponse, error) {
+func waitFor(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func registerSession(ctx context.Context, client *http.Client, centerURL string, reqBody session.RegisterRequest) (session.RegisterResponse, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return session.RegisterResponse{}, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, centerEndpoint(centerURL, "/agent/register"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, centerEndpoint(centerURL, "/agent/register"), bytes.NewReader(body))
 	if err != nil {
 		return session.RegisterResponse{}, err
 	}
@@ -124,13 +175,13 @@ func registerSession(client *http.Client, centerURL string, reqBody session.Regi
 	return registerResp, nil
 }
 
-func sendHeartbeat(client *http.Client, centerURL string, reqBody heartbeat.HeartbeatRequest) (heartbeat.HeartbeatResponse, error) {
+func sendHeartbeat(ctx context.Context, client *http.Client, centerURL string, reqBody heartbeat.HeartbeatRequest) (heartbeat.HeartbeatResponse, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return heartbeat.HeartbeatResponse{}, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, centerEndpoint(centerURL, "/heartbeat"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, centerEndpoint(centerURL, "/heartbeat"), bytes.NewReader(body))
 	if err != nil {
 		return heartbeat.HeartbeatResponse{}, err
 	}
@@ -146,7 +197,10 @@ func sendHeartbeat(client *http.Client, centerURL string, reqBody heartbeat.Hear
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return heartbeat.HeartbeatResponse{}, fmt.Errorf("heartbeat failed, status: %d", resp.StatusCode)
+		return heartbeat.HeartbeatResponse{}, &HTTPStatusError{
+			Operation:  "heartbeat",
+			StatusCode: resp.StatusCode,
+		}
 	}
 
 	var heartbeatResp heartbeat.HeartbeatResponse
