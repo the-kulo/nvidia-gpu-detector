@@ -2,11 +2,11 @@ package center
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"time"
 
 	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
-	"github.com/the-kulo/nvidia-gpu-detector/internal/token"
+	"github.com/the-kulo/nvidia-gpu-detector/internal/service"
 )
 
 func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
@@ -28,48 +28,27 @@ func (s *Server) HeartbeatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.sessionStore.VerifyHeartbeat(
-		req.AgentName,
-		req.SessionID,
-		req.Sequence,
-		req.RenewToken,
-	)
+	result, err := s.heartbeatService.HandleHeartbeat(service.HeartbeatCommand{
+		AgentName:  req.AgentName,
+		SessionID:  req.SessionID,
+		Hostname:   req.Hostname,
+		Version:    req.Version,
+		Sequence:   req.Sequence,
+		RenewToken: req.RenewToken,
+	})
 	if err != nil {
-		http.Error(w, "heartbeat verify failed", http.StatusUnauthorized)
-		return
-	}
-
-	newRenewtoken, err := token.GenerateRenewToken()
-	if err != nil {
-		http.Error(w, "generate token failed", http.StatusInternalServerError)
+		if errors.Is(err, service.ErrHeartbeatRejected) {
+			http.Error(w, "heartbeat rejected", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	resp := heartbeat.HeartbeatResponse{
-		ServerTime:       time.Now(),
-		RenewToken:       newRenewtoken,
-		NextHeartbeatSec: 10,
-	}
-
-	err = s.sessionStore.UpdateHeartbeat(
-		req.AgentName,
-		req.SessionID,
-		req.Sequence,
-		resp.RenewToken,
-	)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	err = s.agentStore.UpdateLastSeen(
-		req.AgentName,
-		req.Hostname,
-		req.Version,
-	)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+		ServerTime:       result.ServerTime,
+		RenewToken:       result.RenewToken,
+		NextHeartbeatSec: result.NextHeartbeatSec,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

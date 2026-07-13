@@ -5,21 +5,25 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/the-kulo/nvidia-gpu-detector/internal/service"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/store"
 )
 
 type Server struct {
-	agentStore   *store.AgentStore
-	sessionStore *store.SessionStore
+	agentStore       *store.AgentStore
+	sessionStore     *store.SessionStore
+	heartbeatService service.HeartbeatService
 }
 
 func NewServer(
 	agentStore *store.AgentStore,
 	sessionStore *store.SessionStore,
+	heartbeatService service.HeartbeatService,
 ) *Server {
 	return &Server{
-		agentStore:   agentStore,
-		sessionStore: sessionStore,
+		agentStore:       agentStore,
+		sessionStore:     sessionStore,
+		heartbeatService: heartbeatService,
 	}
 }
 
