@@ -1,9 +1,12 @@
 package store
 
 import (
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/model"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -393,6 +396,177 @@ func TestSessionStoreUpdateHeartbeat(t *testing.T) {
 				t.Fatalf("last_seen_at = %v, want after %v", got.LastSeenAt, now.Add(-time.Minute))
 			}
 		})
+	}
+}
+
+func TestSessionStoreAcceptHeartbeat(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name              string
+		status            string
+		lastSequence      int64
+		storedRenewToken  string
+		sequence          int64
+		currentRenewToken string
+		wantRejected      bool
+	}{
+		{
+			name:              "valid heartbeat is accepted",
+			status:            model.SessionStatusOnline,
+			lastSequence:      10,
+			storedRenewToken:  "token-old",
+			sequence:          11,
+			currentRenewToken: "token-old",
+		},
+		{
+			name:              "wrong token is rejected",
+			status:            model.SessionStatusOnline,
+			lastSequence:      10,
+			storedRenewToken:  "token-old",
+			sequence:          11,
+			currentRenewToken: "token-wrong",
+			wantRejected:      true,
+		},
+		{
+			name:              "wrong sequence is rejected",
+			status:            model.SessionStatusOnline,
+			lastSequence:      10,
+			storedRenewToken:  "token-old",
+			sequence:          12,
+			currentRenewToken: "token-old",
+			wantRejected:      true,
+		},
+		{
+			name:              "ended session is rejected",
+			status:            model.SessionStatusEnded,
+			lastSequence:      10,
+			storedRenewToken:  "token-old",
+			sequence:          11,
+			currentRenewToken: "token-old",
+			wantRejected:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			sessionStore := NewSessionStore(db)
+			lastSeenAt := now.Add(-time.Minute)
+			session := model.AgentSession{
+				AgentName:      "agent-001",
+				SessionID:      "session-001",
+				Status:         tt.status,
+				LastSequence:   tt.lastSequence,
+				LastRenewToken: tt.storedRenewToken,
+				LastSeenAt:     lastSeenAt,
+				StartedAt:      lastSeenAt,
+			}
+			if err := db.Create(&session).Error; err != nil {
+				t.Fatalf("create session failed: %v", err)
+			}
+
+			err := sessionStore.AcceptHeartbeat(
+				"agent-001",
+				"session-001",
+				tt.sequence,
+				tt.currentRenewToken,
+				"token-new",
+			)
+			if tt.wantRejected {
+				if !errors.Is(err, heartbeat.ErrRejected) {
+					t.Fatalf("error = %v, want heartbeat.ErrRejected", err)
+				}
+			} else if err != nil {
+				t.Fatalf("AcceptHeartbeat() error = %v", err)
+			}
+
+			var got model.AgentSession
+			if err := db.Where("session_id = ?", "session-001").First(&got).Error; err != nil {
+				t.Fatalf("query session failed: %v", err)
+			}
+
+			if tt.wantRejected {
+				if got.LastSequence != tt.lastSequence || got.LastRenewToken != tt.storedRenewToken || !got.LastSeenAt.Equal(lastSeenAt) {
+					t.Fatalf("rejected heartbeat changed session: sequence=%d token=%q last_seen_at=%v", got.LastSequence, got.LastRenewToken, got.LastSeenAt)
+				}
+				return
+			}
+
+			if got.LastSequence != tt.sequence {
+				t.Fatalf("last_sequence = %d, want %d", got.LastSequence, tt.sequence)
+			}
+			if got.LastRenewToken != "token-new" {
+				t.Fatalf("last_renew_token = %q, want token-new", got.LastRenewToken)
+			}
+			if !got.LastSeenAt.After(lastSeenAt) {
+				t.Fatalf("last_seen_at = %v, want after %v", got.LastSeenAt, lastSeenAt)
+			}
+		})
+	}
+}
+
+func TestSessionStoreAcceptHeartbeatConcurrentDuplicate(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql db failed: %v", err)
+	}
+	// A single connection keeps SQLite's in-memory database shared by both calls
+	// while still exercising the conditional update from concurrent goroutines.
+	sqlDB.SetMaxOpenConns(1)
+
+	lastSeenAt := time.Now().Add(-time.Minute)
+	session := model.AgentSession{
+		AgentName:      "agent-001",
+		SessionID:      "session-001",
+		Status:         model.SessionStatusOnline,
+		LastSequence:   10,
+		LastRenewToken: "token-old",
+		LastSeenAt:     lastSeenAt,
+		StartedAt:      lastSeenAt,
+	}
+	if err := db.Create(&session).Error; err != nil {
+		t.Fatalf("create session failed: %v", err)
+	}
+
+	sessionStore := NewSessionStore(db)
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- sessionStore.AcceptHeartbeat(
+				"agent-001",
+				"session-001",
+				11,
+				"token-old",
+				"token-new",
+			)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	succeeded := 0
+	rejected := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, heartbeat.ErrRejected):
+			rejected++
+		default:
+			t.Fatalf("unexpected AcceptHeartbeat() error: %v", err)
+		}
+	}
+
+	if succeeded != 1 || rejected != 1 {
+		t.Fatalf("results: succeeded=%d rejected=%d, want 1 each", succeeded, rejected)
 	}
 }
 

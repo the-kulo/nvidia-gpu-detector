@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/the-kulo/nvidia-gpu-detector/internal/heartbeat"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/model"
 	"gorm.io/gorm"
 )
@@ -119,6 +120,40 @@ func (s *SessionStore) UpdateHeartbeat(
 
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("session not found or not online")
+	}
+
+	return nil
+}
+
+func (s *SessionStore) AcceptHeartbeat(
+	agentName string,
+	sessionID string,
+	sequence int64,
+	currentRenewToken string,
+	newRenewToken string,
+) error {
+	result := s.db.
+		Model(&model.AgentSession{}).
+		Where(
+			"agent_name = ? AND session_id = ? AND status = ? AND last_sequence = ? AND last_renew_token = ?",
+			agentName,
+			sessionID,
+			model.SessionStatusOnline,
+			sequence-1,
+			currentRenewToken,
+		).
+		Updates(map[string]any{
+			"last_sequence":    sequence,
+			"last_renew_token": newRenewToken,
+			"last_seen_at":     time.Now(),
+		})
+
+	if result.Error != nil {
+		return fmt.Errorf("accept session heartbeat failed: %w", result.Error)
+	}
+
+	if result.RowsAffected != 1 {
+		return heartbeat.ErrRejected
 	}
 
 	return nil
