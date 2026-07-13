@@ -8,6 +8,7 @@ import (
 	"github.com/the-kulo/nvidia-gpu-detector/internal/config"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/db"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/model"
+	"github.com/the-kulo/nvidia-gpu-detector/internal/service"
 	"github.com/the-kulo/nvidia-gpu-detector/internal/store"
 )
 
@@ -36,8 +37,9 @@ func main() {
 
 	agentStore := store.NewAgentStore(gormDB)
 	sessionStore := store.NewSessionStore(gormDB)
+	heartbeatService := service.NewHeartbeatService(agentStore, sessionStore)
 
-	server := center.NewServer(agentStore, sessionStore)
+	server := center.NewServer(agentStore, sessionStore, heartbeatService)
 
 	addr := cfg.Server.Addr
 	fmt.Println("server addr:", addr)
