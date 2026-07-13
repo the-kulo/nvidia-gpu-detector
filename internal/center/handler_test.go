@@ -50,11 +50,13 @@ func setupTestServer(t *testing.T, heartbeatService service.HeartbeatService) te
 		t.Fatalf("migrate test db failed: %v", err)
 	}
 
-	server := NewServer(
-		store.NewAgentStore(db),
-		store.NewSessionStore(db),
-		heartbeatService,
-	)
+	agentStore := store.NewAgentStore(db)
+	sessionStore := store.NewSessionStore(db)
+	if heartbeatService == nil {
+		heartbeatService = service.NewHeartbeatService(agentStore, sessionStore)
+	}
+
+	server := NewServer(agentStore, sessionStore, heartbeatService)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent/register", server.RegisterHandler)
@@ -170,6 +172,47 @@ func TestHeartbeatHandlerMapsOperationalErrorToInternalServerError(t *testing.T)
 	}
 	if len(heartbeatService.commands) != 1 {
 		t.Fatalf("service call count = %d, want 1", len(heartbeatService.commands))
+	}
+}
+
+func TestHeartbeatHandlerWithStoreMapsExpiredSessionToUnauthorized(t *testing.T) {
+	testServer := setupTestServer(t, nil)
+	now := time.Now()
+	session := model.AgentSession{
+		AgentName:      "agent-001",
+		SessionID:      "session-001",
+		Status:         model.SessionStatusEnded,
+		LastSequence:   0,
+		LastRenewToken: "old-token",
+		LastSeenAt:     now.Add(-time.Minute),
+		StartedAt:      now.Add(-time.Minute),
+		EndedAt:        now,
+	}
+	if err := testServer.db.Create(&session).Error; err != nil {
+		t.Fatalf("create expired session failed: %v", err)
+	}
+
+	status := postJSON(t, testServer.handler, "/heartbeat", validHeartbeatRequest(), nil)
+
+	if status != http.StatusUnauthorized {
+		t.Fatalf("heartbeat status = %d, want %d", status, http.StatusUnauthorized)
+	}
+}
+
+func TestHeartbeatHandlerWithStoreMapsDatabaseFailureToInternalServerError(t *testing.T) {
+	testServer := setupTestServer(t, nil)
+	sqlDB, err := testServer.db.DB()
+	if err != nil {
+		t.Fatalf("get sql db failed: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close sql db failed: %v", err)
+	}
+
+	status := postJSON(t, testServer.handler, "/heartbeat", validHeartbeatRequest(), nil)
+
+	if status != http.StatusInternalServerError {
+		t.Fatalf("heartbeat status = %d, want %d", status, http.StatusInternalServerError)
 	}
 }
 

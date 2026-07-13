@@ -570,6 +570,82 @@ func TestSessionStoreAcceptHeartbeatConcurrentDuplicate(t *testing.T) {
 	}
 }
 
+func TestSessionStoreExpirationBeforeHeartbeatRejectsHeartbeat(t *testing.T) {
+	db := setupTestDB(t)
+	sessionStore := NewSessionStore(db)
+	now := time.Now()
+	session := model.AgentSession{
+		AgentName:      "agent-001",
+		SessionID:      "session-001",
+		Status:         model.SessionStatusOnline,
+		LastSequence:   10,
+		LastRenewToken: "token-old",
+		LastSeenAt:     now.Add(-time.Minute),
+		StartedAt:      now.Add(-time.Minute),
+	}
+	if err := db.Create(&session).Error; err != nil {
+		t.Fatalf("create session failed: %v", err)
+	}
+
+	if err := sessionStore.MarkExpiredBefore(now.Add(-30 * time.Second)); err != nil {
+		t.Fatalf("MarkExpiredBefore() error = %v", err)
+	}
+	if err := sessionStore.AcceptHeartbeat("agent-001", "session-001", 11, "token-old", "token-new"); !errors.Is(err, heartbeat.ErrRejected) {
+		t.Fatalf("AcceptHeartbeat() error = %v, want heartbeat.ErrRejected", err)
+	}
+
+	var got model.AgentSession
+	if err := db.Where("session_id = ?", session.SessionID).First(&got).Error; err != nil {
+		t.Fatalf("query session failed: %v", err)
+	}
+	if got.Status != model.SessionStatusEnded {
+		t.Fatalf("status = %q, want %q", got.Status, model.SessionStatusEnded)
+	}
+	if got.LastSequence != 10 || got.LastRenewToken != "token-old" {
+		t.Fatalf("rejected heartbeat changed credentials: sequence=%d token=%q", got.LastSequence, got.LastRenewToken)
+	}
+}
+
+func TestSessionStoreHeartbeatBeforeExpirationKeepsSessionOnline(t *testing.T) {
+	db := setupTestDB(t)
+	sessionStore := NewSessionStore(db)
+	now := time.Now()
+	cutoff := now.Add(-30 * time.Second)
+	session := model.AgentSession{
+		AgentName:      "agent-001",
+		SessionID:      "session-001",
+		Status:         model.SessionStatusOnline,
+		LastSequence:   10,
+		LastRenewToken: "token-old",
+		LastSeenAt:     now.Add(-time.Minute),
+		StartedAt:      now.Add(-time.Minute),
+	}
+	if err := db.Create(&session).Error; err != nil {
+		t.Fatalf("create session failed: %v", err)
+	}
+
+	if err := sessionStore.AcceptHeartbeat("agent-001", "session-001", 11, "token-old", "token-new"); err != nil {
+		t.Fatalf("AcceptHeartbeat() error = %v", err)
+	}
+	if err := sessionStore.MarkExpiredBefore(cutoff); err != nil {
+		t.Fatalf("MarkExpiredBefore() error = %v", err)
+	}
+
+	var got model.AgentSession
+	if err := db.Where("session_id = ?", session.SessionID).First(&got).Error; err != nil {
+		t.Fatalf("query session failed: %v", err)
+	}
+	if got.Status != model.SessionStatusOnline {
+		t.Fatalf("status = %q, want %q", got.Status, model.SessionStatusOnline)
+	}
+	if got.LastSequence != 11 || got.LastRenewToken != "token-new" {
+		t.Fatalf("accepted heartbeat not retained: sequence=%d token=%q", got.LastSequence, got.LastRenewToken)
+	}
+	if !got.EndedAt.IsZero() {
+		t.Fatalf("ended_at = %v, want zero", got.EndedAt)
+	}
+}
+
 func TestSessionStoreNewSessionStartsFromSequenceOne(t *testing.T) {
 	db := setupTestDB(t)
 	sessionStore := NewSessionStore(db)
